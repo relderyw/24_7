@@ -1,546 +1,168 @@
 import os
-import json
 import time
 import requests
+import json
+import asyncio
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from telegram import Bot  # Requires python-telegram-bot v20.0+: pip install python-telegram-bot
 
-# ---------------- CONFIGURAÇÃO ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "6569266928:AAHm7pOJVsd3WKzJEgdVDez4ZYdCAlRoYO8")
-CHAT_ID = os.getenv("CHAT_ID", "-1001981134607")
-TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+BOT_TOKEN = "6569266928:AAHm7pOJVsd3WKzJEgdVDez4ZYdCAlRoYO8"
+CHAT_ID = "-1001981134607"
+LIVE_API_URL = "https://caveira-proxy.onrender.com/api/matches/live"
+H2H_API_URL = "https://caveira-proxy.onrender.com/api/v1/historico/confronto/{player1}/{player2}?page=1&limit=10"
 
-LOOP_INTERVAL = 30
-MAX_SEND_WORKERS = 4
-SENT_FILE = "sent.json"
-RELATORIO_FILE = "relatorio.json"
-_sent_lock = Lock()
+# Manaus timezone is UTC-4
+MANAUS_TZ = timezone(timedelta(hours=-4))
 
-# Carrega mensagens enviadas
-def load_sent_messages():
-    if not os.path.exists(SENT_FILE):
-        return set()
+def fetch_live_matches():
     try:
-        with open(SENT_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
+        response = requests.get(LIVE_API_URL)
+        response.raise_for_status()
+        return response.json().get('data', [])
     except Exception as e:
-        print("⚠️ Erro ao carregar sent.json:", e)
-        return set()
+        print(f"Error fetching live API: {e}")
+        return []
 
-def save_sent_messages(sent_set):
-    tmp = SENT_FILE + ".tmp"
+def fetch_h2h_data(player1, player2):
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(list(sent_set), f, ensure_ascii=False, indent=2)
-        os.replace(tmp, SENT_FILE)
+        url = H2H_API_URL.format(player1=player1, player2=player2)
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
     except Exception as e:
-        print("⚠️ Erro ao salvar sent.json:", e)
-
-sent_messages = load_sent_messages()
-
-# ------------- Fuso Horário ---------------
-try:
-    from zoneinfo import ZoneInfo
-    SP_TZ = ZoneInfo("America/Manaus")
-except ImportError:
-    try:
-        import pytz
-        SP_TZ = pytz.timezone("America/Manaus")
-    except ImportError:
-        SP_TZ = None
-except Exception:
-    SP_TZ = None
-
-def format_datetime_for_display(iso_str):
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        if SP_TZ:
-            dt = dt.astimezone(SP_TZ)
-        else:
-            dt = dt.astimezone()
-        return dt.strftime("%d/%m %H:%M")
-    except Exception:
-        return iso_str
-
-# Formata timedelta como MM:SS
-def format_timedelta(td):
-    total_seconds = int(td.total_seconds())
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
-    return f"{minutes:02d}:{seconds:02d}"
-
-# ------------- Lógica de Estatísticas Aprimorada -------------
-
-RECENT_WEIGHTS = [0.4, 0.3, 0.2, 0.07, 0.03]  # Peso decrescente
-
-def parse_score(score, scoreHT=None):
-    def safe_int(value, default=0):
-        if value is None: return default
-        try: return int(value)
-        except: return default
-    homeFT = safe_int(score.get("home", 0)) if score else 0
-    awayFT = safe_int(score.get("away", 0)) if score else 0
-    homeHT = safe_int(scoreHT.get("home", homeFT // 2)) if scoreHT else homeFT // 2
-    awayHT = safe_int(scoreHT.get("away", awayFT // 2)) if scoreHT else awayFT // 2
-    return {
-        "homeGoals": homeFT, "awayGoals": awayFT,
-        "totalGoals": homeFT + awayFT,
-        "homeGoalsHT": homeHT, "awayGoalsHT": awayHT,
-        "totalGoalsHT": homeHT + awayHT
-    }
-
-def get_recent_games(playerName, allGames, limit=5):
-    games = [g for g in allGames if (g.get("home", {}).get("name") == playerName or g.get("away", {}).get("name") == playerName)]
-    return sorted(games, key=lambda x: x.get("startTime", ""), reverse=True)[:limit]
-
-def get_player_stats(playerName, allGames):
-    games = get_recent_games(playerName, allGames, 5)
-    if not games:
-        return {key: 0 for key in [
-            "winRate", "avgGoals", "over15HT", "over25HT", "over35HT", "bttsHT",
-            "over15FT", "over25FT", "over35FT", "over45FT", "over55FT", "over65FT", "bttsFT"
-        ]}
-
-    wins = 0
-    goalsScored = 0
-    total_goals = 0
-    counters = {k: 0 for k in [
-        "over15HT", "over25HT", "over35HT", "bttsHT",
-        "over15FT", "over25FT", "over35FT", "over45FT", "over55FT", "over65FT", "bttsFT"
-    ]}
-
-    for idx, g in enumerate(games):
-        score = parse_score(g.get("score"), g.get("scoreHT"))
-        home = g.get("home", {}).get("name")
-        isHome = (home == playerName)
-        scored = score["homeGoals"] if isHome else score["awayGoals"]
-        conceded = score["awayGoals"] if isHome else score["homeGoals"]
-        if scored > conceded:
-            wins += RECENT_WEIGHTS[idx]
-        goalsScored += scored * RECENT_WEIGHTS[idx]
-        total_goals += score["totalGoals"] * RECENT_WEIGHTS[idx]
-
-        w = RECENT_WEIGHTS[idx]
-        if score["totalGoalsHT"] > 1.5: counters["over15HT"] += w
-        if score["totalGoalsHT"] > 2.5: counters["over25HT"] += w
-        if score["totalGoalsHT"] > 3.5: counters["over35HT"] += w
-        if score["homeGoalsHT"] > 0 and score["awayGoalsHT"] > 0: counters["bttsHT"] += w
-        if score["totalGoals"] > 1.5: counters["over15FT"] += w
-        if score["totalGoals"] > 2.5: counters["over25FT"] += w
-        if score["totalGoals"] > 3.5: counters["over35FT"] += w
-        if score["totalGoals"] > 4.5: counters["over45FT"] += w
-        if score["totalGoals"] > 5.5: counters["over55FT"] += w
-        if score["totalGoals"] > 6.5: counters["over65FT"] += w
-        if score["homeGoals"] > 0 and score["awayGoals"] > 0: counters["bttsFT"] += w
-
-    avg_goals = round(goalsScored / sum(RECENT_WEIGHTS[:len(games)]), 1)
-    total_weight = sum(RECENT_WEIGHTS[:len(games)])
-
-    return {
-        "winRate": round((wins / total_weight) * 100),
-        "avgGoals": avg_goals,
-        "avgGoalsFT": round(total_goals / total_weight, 1),
-        **{k: round(v / total_weight * 100) for k, v in counters.items()}
-    }
-
-def get_league_stats(leagueName, allGames):
-    games = [g for g in allGames if g.get("competition", {}).get("name") == leagueName]
-    if len(games) < 5:
+        print(f"Error fetching H2H API for {player1} vs {player2}: {e}")
         return None
 
-    counters = {k: 0 for k in [
-        "over15HT", "over25HT", "over35HT", "bttsHT",
-        "over15FT", "over25FT", "over35FT", "over45FT", "over55FT", "bttsFT"
-    ]}
-    total_goals_ht = 0
-    total_goals_ft = 0
+def get_match_time_in_minutes(match):
+    timer = match.get('timer')
+    if not timer:
+        return 0
+    tm = timer.get('tm', 0)
+    ts = timer.get('ts', 0)
+    return tm + (ts / 60)
 
-    for g in games[:10]:
-        score = parse_score(g.get("score"), g.get("scoreHT"))
-        total_goals_ht += score["totalGoalsHT"]
-        total_goals_ft += score["totalGoals"]
-
-        if score["totalGoalsHT"] > 1.5: counters["over15HT"] += 1
-        if score["totalGoalsHT"] > 2.5: counters["over25HT"] += 1
-        if score["totalGoalsHT"] > 3.5: counters["over35HT"] += 1
-        if score["homeGoalsHT"] > 0 and score["awayGoalsHT"] > 0: counters["bttsHT"] += 1
-        if score["totalGoals"] > 1.5: counters["over15FT"] += 1
-        if score["totalGoals"] > 2.5: counters["over25FT"] += 1
-        if score["totalGoals"] > 3.5: counters["over35FT"] += 1
-        if score["totalGoals"] > 4.5: counters["over45FT"] += 1
-        if score["totalGoals"] > 5.5: counters["over55FT"] += 1
-        if score["homeGoals"] > 0 and score["awayGoals"] > 0: counters["bttsFT"] += 1
-
-    total = len(games[:10])
-    return {
-        **{k: round(v / total * 100) for k, v in counters.items()},
-        "avgGoalsHT": round(total_goals_ht / total, 2),
-        "avgGoalsFT": round(total_goals_ft / total, 2),
-        "gameCount": total
-    }
-
-# --- Mapeamento de Liga -> Previsão para Backtest ---
-PREVISOES = {
-    "Esoccer Battle - 8 mins play": {"tipo": "over", "gols": 4.5, "threshold": 5},
-    "Esoccer H2H GG League - 8 mins play": {"tipo": "over", "gols": 3.5, "threshold": 4},
-    "Esoccer Battle Volta - 6 mins play": {"tipo": "over", "gols": 5.5, "threshold": 6},
-    "Esoccer GT Leagues – 12 mins play": {"tipo": "over", "gols": 4.5, "threshold": 5},
-    "Esoccer Adriatic League - 10 mins play": {"tipo": "over", "gols": 4.5, "threshold": 5},
-}
-
-def get_short_league_name(leagueName):
-    shortNames = {
-        "Esoccer Battle - 8 mins play": "Battle 8m",
-        "Esoccer Battle Volta - 6 mins play": "Battle Volta 6m",
-        "Esoccer GT Leagues – 12 mins play": "GT Leagues 12m",
-        "Esoccer H2H GG League - 8 mins play": "H2H GG 8m",
-        "Esoccer Adriatic League - 10 mins play": "Adriatic 10m"
-    }
-    return shortNames.get(leagueName, leagueName)
-
-def meets_league_criteria(leagueName, player1Stats, player2Stats, leagueStats):
-    avg_diff = abs(player1Stats["avgGoals"] - player2Stats["avgGoals"])
-    if avg_diff > 2.5:
-        return False
-
-    form = max(player1Stats["winRate"], player2Stats["winRate"])
-    if form < 40:
-        return False
-
-    form_over35ht = max(player1Stats["over35HT"], player2Stats["over35HT"])
-    if form_over35ht < 60:
-        return False
-
-    if leagueName == "Esoccer Battle - 8 mins play":
-        return (
-            leagueStats["over15HT"] >= 90 and
-            leagueStats["over25HT"] >= 90 and
-            leagueStats["bttsHT"] >= 90 and
-            leagueStats["over45FT"] >= 85 and
-            leagueStats["bttsFT"] >= 90 and
-            leagueStats["avgGoalsHT"] > 2.0
-        )
-
-    if leagueName == "Esoccer H2H GG League - 8 mins play":
-        return (
-            leagueStats["over15HT"] >= 90 and
-            leagueStats["over25HT"] >= 90 and
-            leagueStats["bttsHT"] >= 80 and
-            leagueStats["over35FT"] >= 85 and
-            leagueStats["bttsFT"] >= 85 and
-            leagueStats["avgGoalsFT"] > 3.5
-        )
-
-    if leagueName == "Esoccer Battle Volta - 6 mins play":
-        return (
-            leagueStats["over25HT"] >= 90 and
-            leagueStats["over35HT"] >= 85 and
-            leagueStats["bttsHT"] >= 90 and
-            leagueStats["over55FT"] >= 85 and
-            leagueStats["bttsFT"] >= 90 and
-            leagueStats["avgGoalsFT"] > 5.0
-        )
-
-    if leagueName == "Esoccer GT Leagues – 12 mins play":
-        return (
-            leagueStats["over35HT"] >= 90 and
-            leagueStats["bttsHT"] >= 90 and
-            leagueStats["over45FT"] >= 90 and
-            leagueStats["bttsFT"] >= 90 and
-            leagueStats["avgGoalsHT"] > 2.5
-        )
-
-    if leagueName == "Esoccer Adriatic League - 10 mins play":
-        return (
-            leagueStats["over35HT"] >= 90 and
-            leagueStats["bttsHT"] >= 90 and
-            leagueStats["over45FT"] >= 90 and
-            leagueStats["over55FT"] >= 80 and
-            leagueStats["bttsFT"] >= 90 and
-            leagueStats["avgGoalsFT"] > 4.5
-        )
-
+def is_first_half(match, league_name):
+    if "8 mins play" in league_name:
+        return get_match_time_in_minutes(match) < 4
+    elif "12 mins play" in league_name:
+        return get_match_time_in_minutes(match) < 6
     return False
 
-def get_player_strategy(home, away, p1, p2):
-    avg1, avg2 = p1["avgGoals"], p2["avgGoals"]
-    if avg1 > avg2 and avg1 >= 3.0 and avg2 <= 1.2 and p1["winRate"] > p2["winRate"]:
-        return f"+2.5 GOLS {home}"
-    if avg2 > avg1 and avg2 >= 3.0 and avg1 <= 1.2 and p2["winRate"] > p1["winRate"]:
-        return f"+2.5 GOLS {away}"
-    return None
+def calculate_dangerous_attacks_rate(match, current_time):
+    if current_time == 0:
+        return 0
+    dangerous_attacks = match.get('stats', {}).get('dangerous_attacks', [0, 0])
+    total_da = int(dangerous_attacks[0]) + int(dangerous_attacks[1])
+    return total_da / current_time
 
-def send_telegram_message(game, league_stats, p1, p2, strategy):
-    try:
-        home = game.get("home", {}).get("name", "N/A")
-        away = game.get("away", {}).get("name", "N/A")
-        league = game.get("competition", {}).get("name", "N/A")
-        shortLeague = get_short_league_name(league)
-        startTime = game.get("startTime", "")
-        match_key = f"{home}_vs_{away}_{league}_{startTime}"
-        if not _mark_sent_and_persist(match_key):
-            return False
+def calculate_h2h_metrics(h2h_data):
+    if not h2h_data or 'matches' not in h2h_data:
+        return None
 
-        date_display = format_datetime_for_display(startTime)
-        text = (
-            f"🏆 <b>{shortLeague}</b> 🚨 Alerta de Jogo!\n\n"
-            f"📅 <b>{date_display}</b>\n\n"
-            f"🎯 <b>Estratégia Recomendada:</b> <code>{strategy}</code> 🔥\n\n"
-            f"🎮 <b>{home}</b> ({p1['winRate']}% win) vs <b>{away}</b> ({p2['winRate']}% win)\n"
-            f"⚽ Avg Gols: <code>{p1['avgGoals']} ⚔️ {p2['avgGoals']}</code>\n\n"
-            f"📈 <b>Estatísticas da Liga</b> ({league_stats['gameCount']} jogos):\n"
-            f"• HT: <b>{league_stats['avgGoalsHT']} gols</b> | FT: <b>{league_stats['avgGoalsFT']} gols</b>\n"
-            f"• Over 2.5 HT: <b>{league_stats['over25HT']}%</b> | BTTS HT: <b>{league_stats['bttsHT']}%</b>\n\n"
-            f"• Over 4.5 FT: <b>{league_stats['over45FT']}%</b> | BTTS FT: <b>{league_stats['bttsFT']}%</b>\n\n"
-            f"🤖 <i>Monitorado: 👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮</i>"
-        )
+    matches = h2h_data['matches']
+    total_matches = len(matches)
+    if total_matches == 0:
+        return None
 
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        resp = requests.post(TELEGRAM_URL, json=payload, timeout=10)
-        if resp.ok:
-            print("✅ Mensagem enviada:", match_key)
-            return True
-        else:
-            print("❌ Falha ao enviar:", resp.status_code, resp.text)
-            with _sent_lock:
-                if match_key in sent_messages:
-                    sent_messages.remove(match_key)
-                    save_sent_messages(sent_messages)
-            return False
-    except Exception as e:
-        print("❌ Erro ao enviar mensagem:", e)
-        return False
+    over_0_5_ht = 0
+    over_1_5_ht = 0
+    over_2_5_ht = 0
 
-def fetch_games(status, limit=100, page=1):
-    url = "https://api-v2.green365.com.br/api/v2/sport-events"
-    for _ in range(3):
-        try:
-            resp = requests.get(url, params={"page": page, "limit": limit, "sport": "esoccer", "status": status}, timeout=15)
-            resp.raise_for_status()
-            return resp.json().get("items", [])
-        except Exception as e:
-            print(f"⚠️ Erro ao buscar {status}:", e)
-            time.sleep(10)
-    return []
+    for match in matches:
+        ht_goals = match['halftime_score_home'] + match['halftime_score_away']
+        if ht_goals > 0:
+            over_0_5_ht += 1
+        if ht_goals > 1:
+            over_1_5_ht += 1
+        if ht_goals > 2:
+            over_2_5_ht += 1
 
-def _mark_sent_and_persist(match_key):
-    with _sent_lock:
-        if match_key in sent_messages:
-            return False
-        sent_messages.add(match_key)
-        save_sent_messages(sent_messages)
-        return True
-
-# --- BACKTEST E RELATÓRIO DIÁRIO ---
-def load_relatorio():
-    if not os.path.exists(RELATORIO_FILE):
-        return {}
-    try:
-        with open(RELATORIO_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_relatorio(relatorio):
-    try:
-        with open(RELATORIO_FILE, "w", encoding="utf-8") as f:
-            json.dump(relatorio, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("❌ Erro ao salvar relatório:", e)
-
-def run_backtest(past_games):
-    relatorio = load_relatorio()
-    today_str = datetime.now(SP_TZ).strftime("%Y-%m-%d")
-    if today_str not in relatorio:
-        relatorio[today_str] = {"total": 0, "acertos": 0, "erros": 0, "jogos": []}
-
-    for game in past_games:
-        league = game.get("competition", {}).get("name")
-        if league not in PREVISOES:
-            continue
-
-        home = game.get("home", {}).get("name")
-        away = game.get("away", {}).get("name")
-        score = parse_score(game.get("score"))
-        total_goals = score["totalGoals"]
-
-        prev = PREVISOES[league]
-        acertou = total_goals >= prev["threshold"]
-
-        relatorio[today_str]["total"] += 1
-        if acertou:
-            relatorio[today_str]["acertos"] += 1
-        else:
-            relatorio[today_str]["erros"] += 1
-
-        relatorio[today_str]["jogos"].append({
-            "home": home,
-            "away": away,
-            "liga": get_short_league_name(league),
-            "previsto": f"Over {prev['gols']}",
-            "resultado": f"{score['homeGoals']}-{score['awayGoals']}",
-            "status": "ACERTO" if acertou else "ERRO"
-        })
-
-    save_relatorio(relatorio)
-    return relatorio[today_str]
-
-def send_daily_report():
-    relatorio = load_relatorio()
-    today_str = datetime.now(SP_TZ).strftime("%Y-%m-%d")
-    data = relatorio.get(today_str)
-
-    if not data or data["total"] == 0:
-        return
-
-    taxa = data["acertos"] / data["total"] * 100
-    msg = (
-        f"📈 <b>RELATÓRIO DIÁRIO - {today_str}</b>\n\n"
-        f"✅ <b>{data['acertos']} acertos</b> | ❌ <b>{data['erros']} erros</b> | 🎯 <b>{taxa:.1f}%</b> de acerto\n\n"
-    )
-
-    por_liga = {}
-    for jogo in data["jogos"]:
-        liga = jogo["liga"]
-        if liga not in por_liga:
-            por_liga[liga] = {"acertos": 0, "total": 0}
-        por_liga[liga]["total"] += 1
-        if jogo["status"] == "ACERTO":
-            por_liga[liga]["acertos"] += 1
-
-    for liga, res in por_liga.items():
-        msg += f"🏆 {liga}: {res['acertos']}/{res['total']}\n"
-
-    msg += "\n👉 Amanhã continuamos com foco! 💪"
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML"
+    return {
+        'player1_win_percentage': h2h_data.get('player1_win_percentage', 0),
+        'player2_win_percentage': h2h_data.get('player2_win_percentage', 0),
+        'over_0_5_ht_percentage': (over_0_5_ht / total_matches) * 100 if total_matches > 0 else 0,
+        'over_1_5_ht_percentage': (over_1_5_ht / total_matches) * 100 if total_matches > 0 else 0,
+        'over_2_5_ht_percentage': (over_2_5_ht / total_matches) * 100 if total_matches > 0 else 0
     }
-    try:
-        requests.post(TELEGRAM_URL, json=payload, timeout=10)
-        print("📅 Relatório diário enviado no Telegram!")
-    except Exception as e:
-        print("❌ Falha ao enviar relatório:", e)
 
-# --- LOOP PRINCIPAL ---
-def main_loop():
-    print("🚀 Bot iniciado. Intervalo:", LOOP_INTERVAL, "segundos")
-    last_report_sent = None
+def format_message(match, h2h_metrics):
+    league = match['league']['name']
+    home = match['home']['name']
+    away = match['away']['name']
+    now = datetime.now(MANAUS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    with ThreadPoolExecutor(max_workers=MAX_SEND_WORKERS) as executor:
-        while True:
-            start_time = time.perf_counter()
-            now = datetime.now(SP_TZ)
+    player1 = home.split('(')[-1].rstrip(')')  # Extract player name from e.g., "Napoli (CASTLE)"
+    player2 = away.split('(')[-1].rstrip(')')  # Extract player name from e.g., "Liverpool (SMHAMILA)"
 
-            try:
-                # --- Backtest com jogos encerrados ---
-                past = fetch_games("ended", 100)
-                if past:
-                    run_backtest(past)
+    message = f"🏆 {league}\n\n🎯 +0.5 HT\n\n📅 Data/Hora: {now}\n\n⚽️ {home} vs {away}\n\n"
+    
+    if h2h_metrics:
+        message += (
+            f"📊 Estatísticas H2H (últimos 10 jogos):\n"
+            f"🏅 {player1} Vitórias: {h2h_metrics['player1_win_percentage']:.2f}%\n"
+            f"🏅 {player2} Vitórias: {h2h_metrics['player2_win_percentage']:.2f}%\n"
+            f"⚽ +0.5 Gols HT: {h2h_metrics['over_0_5_ht_percentage']:.2f}%\n"
+            f"⚽ +1.5 Gols HT: {h2h_metrics['over_1_5_ht_percentage']:.2f}%\n"
+            f"⚽ +2.5 Gols HT: {h2h_metrics['over_2_5_ht_percentage']:.2f}%"
+        )
+    else:
+        message += "📊 Estatísticas H2H: Não disponíveis"
 
-                # --- Enviar relatório diário às 23:59 ---
-                if now.hour == 23 and now.minute == 59:
-                    if last_report_sent != now.strftime("%Y-%m-%d"):
-                        send_daily_report()
-                        last_report_sent = now.strftime("%Y-%m-%d")
+    return message
 
-                # --- Análise de próximos jogos ---
-                upcoming = fetch_games("upcoming", 100)
-                tasks = check_and_send_matches(past, upcoming)
-
-                if tasks:
-                    futures = [executor.submit(send_telegram_message, *t) for t in tasks]
-                    for fut in as_completed(futures):
-                        try:
-                            fut.result(timeout=20)
-                            time.sleep(0.2)
-                        except Exception as e:
-                            print("⚠️ Erro:", e)
-                else:
-                    print("— Nenhum sinal encontrado.")
-
-            except Exception as e:
-                print("❌ Erro geral:", e)
-
-            elapsed = time.perf_counter() - start_time
-            time.sleep(max(0, LOOP_INTERVAL - elapsed))
-
-def check_and_send_matches(all_games_past, upcoming_games):
-    tasks = []
-    target_leagues = [
-        "Esoccer GT Leagues – 12 mins play",
-        "Esoccer Battle - 8 mins play",
-        "Esoccer Battle Volta - 6 mins play",
-        "Esoccer H2H GG League - 8 mins play",
-        "Esoccer Adriatic League - 10 mins play"
-    ]
-
-    now = datetime.now(SP_TZ) if SP_TZ else datetime.now()
-
-    for game in upcoming_games:
-        league = game.get("competition", {}).get("name")
-        if league not in target_leagues:
-            continue
-
-        home = game.get("home", {}).get("name")
-        away = game.get("away", {}).get("name")
-        if not home or not away:
-            continue
-
-        start_time_str = game.get("startTime", "")
-        if not start_time_str:
-            continue
-
+async def send_message(bot, match_id, message, sent_matches):
+    if match_id not in sent_matches:
         try:
-            game_start = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-            if SP_TZ:
-                game_start = game_start.astimezone(SP_TZ)
-        except:
-            continue
+            await bot.send_message(chat_id=CHAT_ID, text=message)
+            sent_matches.add(match_id)
+            print(f"Sent message for match {match_id}")
+        except Exception as e:
+            print(f"Error sending message: {e}")
 
-        delta = game_start - now
-        if delta > timedelta(minutes=2) or delta <= timedelta(seconds=0):
-            print(f"{home} vs {away} | hora do jogo: {game_start.strftime('%H:%M')} | hora atual: {now.strftime('%H:%M')}")
-            continue
+async def main():
+    bot = Bot(token=BOT_TOKEN)
+    sent_matches = set()  # To avoid sending duplicates
 
-        print(f"✅ {home} vs {away} | começa em {format_timedelta(delta)}")
+    while True:
+        matches = fetch_live_matches()
+        for match in matches:
+            league_name = match['league']['name']
+            if league_name not in ["Esoccer H2H GG League - 8 mins play", "Esoccer GT Leagues – 12 mins play"]:
+                continue
 
-        league_stats = get_league_stats(league, all_games_past)
-        if not league_stats:
-            print(f"⚠️ Poucos jogos na liga: {league}")
-            continue
+            match_id = match['id']
+            ss = match.get('ss')
+            if ss != "0-0":
+                continue
 
-        p1 = get_player_stats(home, all_games_past)
-        p2 = get_player_stats(away, all_games_past)
+            if not is_first_half(match, league_name):
+                continue
 
-        if meets_league_criteria(league, p1, p2, league_stats):
-            strategy_map = {
-                "Esoccer Battle - 8 mins play": "Over_Battle",
-                "Esoccer H2H GG League - 8 mins play": "Over_H2H",
-                "Esoccer Battle Volta - 6 mins play": "Over_Volta",
-                "Esoccer GT Leagues – 12 mins play": "HT_GT",
-                "Esoccer Adriatic League - 10 mins play": "HT_ADRIATIC"
-            }
-            strategy = strategy_map.get(league)
-        else:
-            strategy = get_player_strategy(home, away, p1, p2)
+            current_time = get_match_time_in_minutes(match)
+            if current_time == 0:
+                continue
 
-        if strategy:
-            tasks.append((game, league_stats, p1, p2, strategy))
+            da_rate = calculate_dangerous_attacks_rate(match, current_time)
+            if da_rate < 1.0:
+                continue
 
-    return tasks
+            # Extract player names from team names
+            home = match['home']['name']
+            away = match['away']['name']
+            player1 = home.split('(')[-1].rstrip(')')  # e.g., CASTLE from Napoli (CASTLE)
+            player2 = away.split('(')[-1].rstrip(')')  # e.g., SMHAMILA from Liverpool (SMHAMILA)
+
+            # Fetch H2H data
+            h2h_data = fetch_h2h_data(player1, player2)
+            h2h_metrics = calculate_h2h_metrics(h2h_data)
+
+            # Check H2H metrics conditions
+            if h2h_metrics and h2h_metrics['over_0_5_ht_percentage'] == 100.0 and h2h_metrics['over_1_5_ht_percentage'] >= 85.0:
+                # Format and send message
+                message = format_message(match, h2h_metrics)
+                await send_message(bot, match_id, message, sent_matches)
+
+        await asyncio.sleep(10)  # Update every 10 seconds
 
 if __name__ == "__main__":
-    try:
-        main_loop()
-    except KeyboardInterrupt:
-        print("✅ Encerrado. Estado salvo.")
-        save_sent_messages(sent_messages)
+    asyncio.run(main())
