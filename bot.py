@@ -293,7 +293,7 @@ def send_telegram_message(game, league_stats, p1, p2, strategy):
             f"• HT: <b>{league_stats['avgGoalsHT']} gols</b> | FT: <b>{league_stats['avgGoalsFT']} gols</b>\n"
             f"• Over 2.5 HT: <b>{league_stats['over25HT']}%</b> | BTTS HT: <b>{league_stats['bttsHT']}%</b>\n\n"
             f"• Over 4.5 FT: <b>{league_stats['over45FT']}%</b> | BTTS FT: <b>{league_stats['bttsFT']}%</b>\n\n"
-            f"🤖 <i>Monitorado: 👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮"
+            f"🤖 <i>Monitorado: 👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮</i>"
         )
 
         payload = {
