@@ -284,17 +284,16 @@ def send_telegram_message(game, league_stats, p1, p2, strategy):
 
         date_display = format_datetime_for_display(startTime)
         text = (
-            f"👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮🎰\n\n"
             f"🏆 <b>{shortLeague}</b> 🚨 Alerta de Jogo!\n\n"
             f"📅 <b>{date_display}</b>\n\n"
+            f"🎯 <b>Estratégia Recomendada:</b> <code>{strategy}</code> 🔥\n\n"
             f"🎮 <b>{home}</b> ({p1['winRate']}% win) vs <b>{away}</b> ({p2['winRate']}% win)\n"
             f"⚽ Avg Gols: <code>{p1['avgGoals']} ⚔️ {p2['avgGoals']}</code>\n\n"
-            f"🎯 <b>Estratégia Recomendada:</b> <code>{strategy}</code> 🔥\n\n"
             f"📈 <b>Estatísticas da Liga</b> ({league_stats['gameCount']} jogos):\n"
             f"• HT: <b>{league_stats['avgGoalsHT']} gols</b> | FT: <b>{league_stats['avgGoalsFT']} gols</b>\n"
-            f"• Over 2.5 HT: <b>{league_stats['over25HT']}%</b> | BTTS HT: <b>{league_stats['bttsHT']}%</b>\n"
+            f"• Over 2.5 HT: <b>{league_stats['over25HT']}%</b> | BTTS HT: <b>{league_stats['bttsHT']}%</b>\n\n"
             f"• Over 4.5 FT: <b>{league_stats['over45FT']}%</b> | BTTS FT: <b>{league_stats['bttsFT']}%</b>\n\n"
-            f"🤖 <i>Monitorado pelo RW Bot</i> | Boa sorte! 💰"
+            f"🤖 <i>Monitorado: 👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮"
         )
 
         payload = {
