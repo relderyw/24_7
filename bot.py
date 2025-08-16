@@ -238,7 +238,7 @@ async def periodic_check(bot):
     global last_summary
     while True:
         try:
-            await asyncio.sleep(600)  # 10 min
+            await asyncio.sleep(300)  # 10 min
             print("[INFO] Verificando status das tips...")
             ended = fetch_ended_matches()
             ended_dict = {}
