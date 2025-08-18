@@ -19,7 +19,7 @@ AUTH_TOKEN = "Bearer oat_OTI1ODQ.ODVCVHlCYmxjWEtBUDBXdEptb0Jlc29MbV9DMUhJaW9BSEx
 # Manaus timezone is UTC-4
 MANAUS_TZ = timezone(timedelta(hours=-4))
 
-sent_tips = []  # [{'match_id': int, 'strategy': str, 'sent_time': datetime, 'status': 'pending/green/red', 'message_id': int, 'message_text': str}]
+sent_tips = []  # [{'match_id': int, 'strategy': str, 'sent_time': datetime, 'status': 'pending/green/red/refund', 'message_id': int, 'message_text': str}]
 last_summary = None  # para não spammar o indicador
 
 
@@ -315,12 +315,12 @@ def format_message(match, h2h_metrics, strategy, bet365_ev_id):
     # H2H
     if h2h_metrics:
         msg += (
-                f"🏅 <i>{h2h_metrics.get('player1_win_percentage', 0):.2f}% vs "
-                f"{h2h_metrics.get('player2_win_percentage', 0):.2f}%</i>\n\n"
-                f"<b>📊 H2H (últimos 10 jogos):</b>\n\n"
+                f"🏅 <i>{h2h_metrics.get('player1_win_percentage', 0):.0f}% vs "
+                f"{h2h_metrics.get('player2_win_percentage', 0):.0f}%</i>\n\n"
                 f"💠 Média gols: <i>{h2h_metrics.get('player1_avg_goals', 0):.2f}</i> vs <i>{h2h_metrics.get('player2_avg_goals', 0):.2f}</i>\n\n"
-                f"⚽ +0.5 HT: <i>{h2h_metrics.get('over_0_5_ht_percentage', 0):.0f}%</i> | +1.5 HT: <i>{h2h_metrics.get('over_1_5_ht_percentage', 0):.0f}%</i> | +2.5 Gols HT: <i>{h2h_metrics.get('over_2_5_ht_percentage', 0):.2f}%</i>\n\n"
-                f"⚽ BTTS HT: <i>{h2h_metrics.get('btts_ht_percentage', 0):.2f}%</i>\n"
+                f"<b>📊 H2H HT (últimos 10 jogos):</b>\n\n"
+                f"⚽ +0.5: <i>{h2h_metrics.get('over_0_5_ht_percentage', 0):.0f}%</i> | +1.5: <i>{h2h_metrics.get('over_1_5_ht_percentage', 0):.0f}%</i> | +2.5: <i>{h2h_metrics.get('over_2_5_ht_percentage', 0):.0f}%</i>\n\n"
+                f"⚽ BTTS HT: <i>{h2h_metrics.get('btts_ht_percentage', 0):.0f}%</i>\n"
         )
     else:
         msg += "📊 H2H: <i>não disponível</i>"
@@ -363,7 +363,7 @@ async def periodic_check(bot):
                 except Exception:
                     continue
             today = datetime.now(MANAUS_TZ).date()
-            greens = reds = 0
+            greens = reds = refunds = 0
             for tip in sent_tips:
                 if tip['sent_time'].date() != today:
                     continue
@@ -385,9 +385,19 @@ async def periodic_check(bot):
                             ft_goals = (m.get('scoreFT', {}).get('home', 0) or 0) + (
                                     m.get('scoreFT', {}).get('away', 0) or 0)
                             if "1.5, 2.0" in tip['strategy']:
-                                tip['status'] = 'green' if 2 <= ft_goals <= 3 else 'red'
+                                if ft_goals < 2:
+                                    tip['status'] = 'red'
+                                elif ft_goals == 2:
+                                    tip['status'] = 'refund'
+                                else:  # ft_goals > 2
+                                    tip['status'] = 'green'
                             elif "2.5, 3.0" in tip['strategy']:
-                                tip['status'] = 'green' if 3 <= ft_goals <= 4 else 'red'
+                                if ft_goals <= 2:
+                                    tip['status'] = 'red'
+                                elif ft_goals == 3:
+                                    tip['status'] = 'refund'
+                                else:  # ft_goals > 3
+                                    tip['status'] = 'green'
                             elif "+1.5 gols" in tip['strategy']:
                                 # Para este tipo de estratégia, verificamos se o jogador específico marcou mais de 1.5 gols
                                 player_name = tip['strategy'].split('+1.5 gols ')[1]
@@ -406,8 +416,13 @@ async def periodic_check(bot):
 
                         print(f"[DEBUG] Tip {tip['match_id']} ⇒ {tip['status']}")
                         # Editar a mensagem original
-                        if tip['status'] in ['green', 'red']:
-                            emoji = "✅✅✅✅✅" if tip['status'] == 'green' else "❌❌❌❌❌"
+                        if tip['status'] in ['green', 'red', 'refund']:
+                            if tip['status'] == 'green':
+                                emoji = "✅✅✅✅✅"
+                            elif tip['status'] == 'red':
+                                emoji = "❌❌❌❌❌"
+                            elif tip['status'] == 'refund':
+                                emoji = "♻️♻️♻️♻️♻️"
                             new_text = tip['message_text'] + f"{emoji}"
                             try:
                                 await bot.edit_message_text(chat_id=CHAT_ID, message_id=tip['message_id'], text=new_text,
@@ -417,12 +432,18 @@ async def periodic_check(bot):
                                 print(f"[ERROR] Erro ao editar mensagem {tip['message_id']}: {edit_e}")
                 if tip['status'] == 'green': greens += 1
                 if tip['status'] == 'red': reds += 1
-            total = greens + reds
+                if tip['status'] == 'refund': refunds += 1
+            total_resolved = greens + reds
+            total = greens + reds + refunds
             if total > 0:
-                perc = (greens / total) * 100.0
+                perc = (greens / total_resolved * 100.0) if total_resolved > 0 else 0.0
                 current_summary = (
                         f"\n\n<b>👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮</b>\n\n"
-                        f"<b>✅ Green [{greens}] x [{reds}] Red ❌</b>\n\n"
+                        f"<b>✅ Green [{greens}]</b>\n"
+                        f"<b>❌ Red [{reds}]</b>\n"
+                        f"<b>♻️ Push [{refunds}]</b>\n"
+
+
                         f"📊 <i>Desempenho: {perc:.2f}%</i>\n\n"
                 )
                 if current_summary != last_summary:
@@ -545,7 +566,7 @@ async def main():
                             await send_message(bot, match_id, msg, sent_matches, strategy)
 
                     # Para Esoccer GT Leagues – 12 mins play
-                    elif "Esoccer GT Leagues – 12 mins play" in league_name and current_time > 4:
+                    elif "Esoccer GT Leagues – 12 mins play" in league_name and current_time > 6:
                         if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0):
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
