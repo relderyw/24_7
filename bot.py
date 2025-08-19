@@ -1,5 +1,3 @@
-# Código Completo Corrigido para Estratégias HT e FT
-
 import os
 import time
 import requests
@@ -22,20 +20,17 @@ MANAUS_TZ = timezone(timedelta(hours=-4))
 sent_tips = []  # [{'match_id': int, 'strategy': str, 'sent_time': datetime, 'status': 'pending/green/red/refund', 'message_id': int, 'message_text': str}]
 last_summary = None  # para não spammar o indicador
 
-
 def fetch_old_live_matches():
     try:
         response = requests.get(OLD_LIVE_API_URL, timeout=10)
         response.raise_for_status()
         data = response.json().get('data', [])
-        valid_matches = [m for m in data if
-                         isinstance(m, dict) and m.get('id') and m.get('league') and m.get('home') and m.get('away')]
+        valid_matches = [m for m in data if isinstance(m, dict) and m.get('id') and m.get('league') and m.get('home') and m.get('away')]
         print(f"[INFO] {len(data)} partidas da API antiga; {len(valid_matches)} válidas")
         return valid_matches
     except Exception as e:
         print(f"[ERROR] fetch_old_live_matches: {e}")
         return []
-
 
 def fetch_bet365_ids():
     try:
@@ -60,7 +55,6 @@ def fetch_bet365_ids():
         print(f"[ERROR] fetch_bet365_ids: {e}")
         return {}
 
-
 def fetch_ended_matches():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 OPR/120.0.0.0",
@@ -74,6 +68,7 @@ def fetch_ended_matches():
     params = {"page": 1, "limit": 150, "sport": "esoccer", "status": "ended"}
     url = ENDED_API_URL
     print(f"[DEBUG] GET {url} params={params}")
+    
     try:
         response = requests.get(url, headers=headers, params=params, timeout=10)
         if response.status_code != 200:
@@ -82,8 +77,7 @@ def fetch_ended_matches():
         data = response.json()
         for item in data.get('items', []):
             start_time_str = (item.get('startTime') or '').rstrip('Z')
-            start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=timezone.utc) if start_time_str else datetime.now(
-                timezone.utc)
+            start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=timezone.utc) if start_time_str else datetime.now(timezone.utc)
             if start_time.date() >= today:
                 items.append(item)
         print(f"[DEBUG] Finalizadas retornadas (hoje+): {len(items)}")
@@ -91,22 +85,16 @@ def fetch_ended_matches():
         print(f"[ERROR] fetch_ended_matches: {e}")
     return items
 
-
 def fetch_h2h_data(player1, player2):
     try:
         url = H2H_API_URL.format(player1=player1, player2=player2)
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-        
-        # Debug temporário - imprimir estrutura da resposta
-        #print(f"[DEBUG] H2H Response para {player1} vs {player2}: {json.dumps(data, indent=2)[:1000]}...")
-        
         return data
     except Exception as e:
         print(f"[ERROR] fetch_h2h_data {player1} vs {player2}: {e}")
         return None
-
 
 def get_match_time_in_minutes(match):
     timer = match.get('timer') or {}
@@ -120,7 +108,6 @@ def get_match_time_in_minutes(match):
     except Exception:
         return float(tm) if isinstance(tm, (int, float)) else 0.0
 
-
 def is_first_half(match, league_name):
     minutes = get_match_time_in_minutes(match)
     if "8 mins play" in league_name:
@@ -131,7 +118,6 @@ def is_first_half(match, league_name):
         is_first = False
     print(f"[DEBUG] {match.get('id','?')} ({league_name}): {minutes:.2f} min | 1ºT: {is_first}")
     return is_first
-
 
 def calculate_dangerous_attacks_rate(match, current_time):
     if current_time <= 0:
@@ -150,12 +136,11 @@ def calculate_dangerous_attacks_rate(match, current_time):
     print(f"[DEBUG] {match.get('id','?')}: DA={total_da} | t={current_time:.2f} ⇒ da_rate={da_rate:.2f}")
     return da_rate
 
-
 def calculate_h2h_metrics(h2h_data, league_name):
     if not h2h_data or 'matches' not in h2h_data:
         print("[DEBUG] H2H ausente/ inválido")
         return None
-    
+
     matches = h2h_data['matches']
     total = len(matches)
     if total == 0:
@@ -173,11 +158,8 @@ def calculate_h2h_metrics(h2h_data, league_name):
     player2_total_goals = 0
 
     print(f"[DEBUG] Analisando {total} jogos H2H...")
-    
+
     for i, m in enumerate(matches):
-        # Debug do match atual
-        #print(f"[DEBUG] Match {i+1}: {json.dumps(m, indent=2)[:300]}...")
-        
         # Resultados do primeiro tempo - mantém como está (funcionando)
         ht_home = m.get('halftime_score_home', 0)
         ht_away = m.get('halftime_score_away', 0)
@@ -188,7 +170,6 @@ def calculate_h2h_metrics(h2h_data, league_name):
         if (ht_home or 0) > 0 and (ht_away or 0) > 0: btts_ht += 1
 
         # CORREÇÃO: Múltiplas tentativas para acessar gols finais
-        # Tentar diferentes estruturas possíveis dos dados
         ft_home = None
         ft_away = None
         
@@ -257,8 +238,6 @@ def calculate_h2h_metrics(h2h_data, league_name):
             ft_home = 0
             ft_away = 0
 
-        #print(f"[DEBUG] Match {i+1} gols finais: {ft_home}-{ft_away}")
-
         # Contagem de vitórias
         if ft_home > ft_away:
             player1_wins += 1
@@ -285,7 +264,7 @@ def calculate_h2h_metrics(h2h_data, league_name):
         'over_2_5_ht_percentage': (over_2_5_ht / total) * 100.0 if total > 0 else 0.0,
         'btts_ht_percentage': (btts_ht / total) * 100.0 if total > 0 else 0.0
     }
-    
+
     print(
         f"[DEBUG] H2H FINAL {league_name} | Win1={player1_win_percentage:.1f}% Win2={player2_win_percentage:.1f}% "
         f"AvgG1={player1_avg_goals:.2f} AvgG2={player2_avg_goals:.2f} | "
@@ -293,9 +272,8 @@ def calculate_h2h_metrics(h2h_data, league_name):
         f"O2.5={metrics['over_2_5_ht_percentage']:.1f} BTTS={metrics['btts_ht_percentage']:.1f}"
     )
     print(f"[DEBUG] Totais: P1_wins={player1_wins}, P2_wins={player2_wins}, P1_goals={player1_total_goals}, P2_goals={player2_total_goals}")
-    
-    return metrics
 
+    return metrics
 
 def format_message(match, h2h_metrics, strategy, bet365_ev_id):
     league = match['league']['name']
@@ -308,33 +286,35 @@ def format_message(match, h2h_metrics, strategy, bet365_ev_id):
     seconds = timer.get('ts', 0)
     game_time = f"{minutes}:{int(seconds):02d}"
     ss = match.get('ss', '0-0')
+    
     # Cabeçalho
     msg = f"\n\n<b>🏆 {league}</b>\n\n<b>🎯 {strategy}</b>\n\n⏳ Tempo: {game_time}\n\n"
     msg += f"🎮 {player1} vs {player2}\n"
     msg += f"⚽ Placar: {ss}\n"
+    
     # H2H
     if h2h_metrics:
         msg += (
-                f"🏅 <i>{h2h_metrics.get('player1_win_percentage', 0):.0f}% vs "
-                f"{h2h_metrics.get('player2_win_percentage', 0):.0f}%</i>\n\n"
-                f"💠 Média gols: <i>{h2h_metrics.get('player1_avg_goals', 0):.2f}</i> vs <i>{h2h_metrics.get('player2_avg_goals', 0):.2f}</i>\n\n"
-                f"<b>📊 H2H HT (últimos 10 jogos):</b>\n\n"
-                f"⚽ +0.5: <i>{h2h_metrics.get('over_0_5_ht_percentage', 0):.0f}%</i> | +1.5: <i>{h2h_metrics.get('over_1_5_ht_percentage', 0):.0f}%</i> | +2.5: <i>{h2h_metrics.get('over_2_5_ht_percentage', 0):.0f}%</i>\n\n"
-                f"⚽ BTTS HT: <i>{h2h_metrics.get('btts_ht_percentage', 0):.0f}%</i>\n"
+            f"🏅 <i>{h2h_metrics.get('player1_win_percentage', 0):.0f}% vs "
+            f"{h2h_metrics.get('player2_win_percentage', 0):.0f}%</i>\n\n"
+            f"💠 Média gols: <i>{h2h_metrics.get('player1_avg_goals', 0):.2f}</i> vs <i>{h2h_metrics.get('player2_avg_goals', 0):.2f}</i>\n\n"
+            f"<b>📊 H2H HT (últimos 10 jogos):</b>\n\n"
+            f"⚽ +0.5: <i>{h2h_metrics.get('over_0_5_ht_percentage', 0):.0f}%</i> | +1.5: <i>{h2h_metrics.get('over_1_5_ht_percentage', 0):.0f}%</i> | +2.5: <i>{h2h_metrics.get('over_2_5_ht_percentage', 0):.0f}%</i>\n\n"
+            f"⚽ BTTS HT: <i>{h2h_metrics.get('btts_ht_percentage', 0):.0f}%</i>\n"
         )
     else:
         msg += "📊 H2H: <i>não disponível</i>"
+    
     if bet365_ev_id:
         msg += f"\n\n🌐 <a href='https://www.bet365.bet.br/#/IP/EV{bet365_ev_id}'>🔗Bet365</a>\n\n"
+    
     return msg
-
 
 async def send_message(bot, match_id, message, sent_matches, strategy):
     if match_id in sent_matches:
         return
     try:
-        message_obj = await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML",
-                                            disable_web_page_preview=True)
+        message_obj = await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML", disable_web_page_preview=True)
         sent_matches.add(match_id)
         print(f"[INFO] Enviado match_id={match_id} ({strategy})")
         sent_tips.append({
@@ -348,12 +328,11 @@ async def send_message(bot, match_id, message, sent_matches, strategy):
     except Exception as e:
         print(f"[ERROR] send_message {match_id}: {e}")
 
-
 async def periodic_check(bot):
     global last_summary
     while True:
         try:
-            await asyncio.sleep(300)  # 5 min
+            await asyncio.sleep(180)  # 5 min
             print("[INFO] Verificando status das tips...")
             ended = fetch_ended_matches()
             ended_dict = {}
@@ -362,50 +341,75 @@ async def periodic_check(bot):
                     ended_dict[int(m['eventID'])] = m
                 except Exception:
                     continue
+            
             today = datetime.now(MANAUS_TZ).date()
             greens = reds = refunds = 0
+            
             for tip in sent_tips:
                 if tip['sent_time'].date() != today:
                     continue
+                
                 if tip['status'] == 'pending':
                     m = ended_dict.get(tip['match_id'])
-                    if m:
+                    if m and m.get('status') == 'ended':  # Verifica explicitamente se a partida terminou
+                        print(f"[DEBUG] Tip {tip['match_id']}: Partida finalizada (status=ended)")
+                        
                         # Verificação para estratégias HT
                         if "HT" in tip['strategy']:
                             ht_goals = (m.get('scoreHT', {}).get('home', 0) or 0) + (
-                                    m.get('scoreHT', {}).get('away', 0) or 0)
+                                m.get('scoreHT', {}).get('away', 0) or 0)
                             if tip['strategy'] == '+0.5 HT':
                                 tip['status'] = 'green' if ht_goals > 0 else 'red'
                             elif tip['strategy'] == '+1.5 HT':
                                 tip['status'] = 'green' if ht_goals > 1 else 'red'
                             elif tip['strategy'] == '+2.5 HT':
                                 tip['status'] = 'green' if ht_goals > 2 else 'red'
+                        
                         # Verificação para estratégias FT
                         else:
-                            ft_goals = (m.get('scoreFT', {}).get('home', 0) or 0) + (
+                            # Tentar obter o placar final do campo 'score' (conforme JSON fornecido)
+                            ft_goals = (m.get('score', {}).get('home', 0) or 0) + (
+                                m.get('score', {}).get('away', 0) or 0)
+                            
+                            print(f"[DEBUG] Tip {tip['match_id']}: Placar final da API (score) = {ft_goals} ({m.get('score')})")
+                            
+                            # Se o placar final for 0, tentar outros campos como fallback
+                            if ft_goals == 0:
+                                # Tentar 'scoreFT' como alternativa
+                                ft_goals = (m.get('scoreFT', {}).get('home', 0) or 0) + (
                                     m.get('scoreFT', {}).get('away', 0) or 0)
+                                print(f"[DEBUG] Tip {tip['match_id']}: Placar final da API (scoreFT) = {ft_goals}")
+                                
+                                # Se ainda for 0, logar uma advertência e pular
+                                if ft_goals == 0:
+                                    print(f"[WARN] Tip {tip['match_id']}: Placar final zerado na API de partidas finalizadas, possível erro de dados")
+                                    continue  # Pula para a próxima verificação
+                            
+                            print(f"[DEBUG] Tip {tip['match_id']}: ft_goals finais = {ft_goals}")
+                            
+                            # Lógica para Asian Handicap
                             if "1.5, 2.0" in tip['strategy']:
                                 if ft_goals < 2:
-                                    tip['status'] = 'red'
+                                    tip['status'] = 'red'  # Menos de 2 gols = red
                                 elif ft_goals == 2:
-                                    tip['status'] = 'refund'
+                                    tip['status'] = 'refund'  # Exatamente 2 gols = push
                                 else:  # ft_goals > 2
-                                    tip['status'] = 'green'
+                                    tip['status'] = 'green'  # Mais de 2 gols = green
+                                    
                             elif "2.5, 3.0" in tip['strategy']:
-                                if ft_goals <= 2:
-                                    tip['status'] = 'red'
+                                if ft_goals < 3:
+                                    tip['status'] = 'red'  # Menos de 3 gols = red
                                 elif ft_goals == 3:
-                                    tip['status'] = 'refund'
+                                    tip['status'] = 'refund'  # Exatamente 3 gols = push
                                 else:  # ft_goals > 3
-                                    tip['status'] = 'green'
+                                    tip['status'] = 'green'  # Mais de 3 gols = green
+                                    
                             elif "+1.5 gols" in tip['strategy']:
-                                # Para este tipo de estratégia, verificamos se o jogador específico marcou mais de 1.5 gols
                                 player_name = tip['strategy'].split('+1.5 gols ')[1]
-                                # Determinar se é o jogador da casa ou visitante
                                 home = tip['message_text'].split('🎮 ')[1].split(' vs ')[0].strip()
                                 away = tip['message_text'].split(' vs ')[1].split('\n')[0].strip()
-                                home_goals = m.get('scoreFT', {}).get('home', 0) or 0
-                                away_goals = m.get('scoreFT', {}).get('away', 0) or 0
+                                home_goals = m.get('score', {}).get('home', 0) or 0
+                                away_goals = m.get('score', {}).get('away', 0) or 0
 
                                 if player_name in home:
                                     tip['status'] = 'green' if home_goals > 1.5 else 'red'
@@ -414,7 +418,8 @@ async def periodic_check(bot):
                                 else:
                                     tip['status'] = 'red'  # Não identificou o jogador
 
-                        print(f"[DEBUG] Tip {tip['match_id']} ⇒ {tip['status']}")
+                        print(f"[DEBUG] Tip {tip['match_id']} ⇒ {tip['status']} (gols: {ft_goals if 'FT' in tip['strategy'] else ht_goals})")
+                        
                         # Editar a mensagem original
                         if tip['status'] in ['green', 'red', 'refund']:
                             if tip['status'] == 'green':
@@ -430,21 +435,21 @@ async def periodic_check(bot):
                                 print(f"[INFO] Mensagem {tip['message_id']} editada para {tip['status']}")
                             except Exception as edit_e:
                                 print(f"[ERROR] Erro ao editar mensagem {tip['message_id']}: {edit_e}")
+                
                 if tip['status'] == 'green': greens += 1
                 if tip['status'] == 'red': reds += 1
                 if tip['status'] == 'refund': refunds += 1
+            
             total_resolved = greens + reds
             total = greens + reds + refunds
             if total > 0:
                 perc = (greens / total_resolved * 100.0) if total_resolved > 0 else 0.0
                 current_summary = (
-                        f"\n\n<b>👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮</b>\n\n"
-                        f"<b>✅ Green [{greens}]</b>\n"
-                        f"<b>❌ Red [{reds}]</b>\n"
-                        f"<b>♻️ Push [{refunds}]</b>\n"
-
-
-                        f"📊 <i>Desempenho: {perc:.2f}%</i>\n\n"
+                    f"\n\n<b>👑 ʀᴡ ᴛɪᴘs - ғɪғᴀ 🎮</b>\n\n"
+                    f"<b>✅ Green [{greens}]</b>\n"
+                    f"<b>❌ Red [{reds}]</b>\n"
+                    f"<b>♻️ Push [{refunds}]</b>\n"
+                    f"📊 <i>Desempenho: {perc:.2f}%</i>\n\n"
                 )
                 if current_summary != last_summary:
                     try:
@@ -460,25 +465,30 @@ async def periodic_check(bot):
         except Exception as e:
             print(f"[ERROR] periodic_check: {e}")
 
-
 async def main():
     bot = Bot(token=BOT_TOKEN)
     sent_matches = set()
+    
     asyncio.create_task(periodic_check(bot))
+    
     while True:
         print(f"[INFO] Ciclo às {datetime.now(MANAUS_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
         try:
             bet365_dict = fetch_bet365_ids()
             matches = fetch_old_live_matches()
+            
             for match in matches:
                 if not isinstance(match, dict):
                     print(f"[WARN] Match inválido: {match}")
                     continue
+                
                 match_id = match.get('id', 'unknown')
                 league_name = (match.get('league') or {}).get('name', 'Desconhecida')
                 home = (match.get('home') or {}).get('name', 'Desconhecido')
                 away = (match.get('away') or {}).get('name', 'Desconhecido')
+                
                 print(f"[DEBUG] Match {match_id}: {home} vs {away} | {league_name}")
+                
                 # Placar atual
                 ss = match.get('ss')
                 if ss:
@@ -488,6 +498,7 @@ async def main():
                         home_goals, away_goals = 0, 0
                 else:
                     home_goals, away_goals = 0, 0
+                
                 total_goals = home_goals + away_goals
                 current_time = get_match_time_in_minutes(match)
 
@@ -496,6 +507,7 @@ async def main():
                 player2 = away.split('(')[-1].rstrip(')') if '(' in away else away
                 k = (player1.lower(), player2.lower())
                 bet365_ev_id = bet365_dict.get(k)
+                
                 # H2H
                 h2h_data = fetch_h2h_data(player1, player2)
                 h2h_metrics = calculate_h2h_metrics(h2h_data, league_name)
@@ -559,7 +571,7 @@ async def main():
                 if (home_goals == 1 and away_goals == 0) or (home_goals == 0 and away_goals == 1):
                     # Para Esoccer Battle - 8 mins play e Esoccer H2H GG League - 8 mins play
                     if ("Esoccer Battle - 8 mins play" in league_name or "Esoccer H2H GG League - 8 mins play" in league_name) and current_time > 4:
-                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0):
+                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 95.0:
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -567,7 +579,7 @@ async def main():
 
                     # Para Esoccer GT Leagues – 12 mins play
                     elif "Esoccer GT Leagues – 12 mins play" in league_name and current_time > 6:
-                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0):
+                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 95.0:
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -586,13 +598,14 @@ async def main():
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
                             if h2h_metrics['player2_avg_goals'] >= 2.5 and h2h_metrics['player2_win_percentage'] >= 60.0:
+
                                 strategy = f"+1.5 gols {player2}"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
                             # "1.5, 2.0 gols FT" se soma das médias >= 3.0
-                            if h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0:
+                            if h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0 and h2h_metrics['over_1_5_ht_percentage'] >= 95.0:
                                 strategy = "1.5, 2.0 gols FT"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -624,8 +637,8 @@ async def main():
 
         except Exception as e:
             print(f"[ERROR] loop principal: {e}")
-        await asyncio.sleep(15)  # a cada 30s
-
+        
+        await asyncio.sleep(10)  # a cada 15s
 
 if __name__ == "__main__":
     asyncio.run(main())
