@@ -520,6 +520,7 @@ async def main():
                         # 8 mins play: até 3'
                         if ("8 mins play" in league_name
                                 and current_time <= 3
+                                and current_time > 0
                                 and h2h_metrics
                                 and h2h_metrics.get('over_1_5_ht_percentage', 0) >= 100.0
                                 and h2h_metrics.get('over_2_5_ht_percentage', 0) >= 70.0):
@@ -530,6 +531,7 @@ async def main():
                         # 12/10 mins play: até 5'
                         elif (("12 mins play" in league_name or "10 mins play" in league_name)
                               and current_time <= 5
+                              and current_time > 0
                               and h2h_metrics
                               and h2h_metrics.get('over_1_5_ht_percentage', 0) >= 100.0
                               and h2h_metrics.get('over_2_5_ht_percentage', 0) >= 85.0):
@@ -547,6 +549,7 @@ async def main():
                             if (h2h_metrics
                                     and h2h_metrics.get('over_1_5_ht_percentage', 0) >= 100.0
                                     and h2h_metrics.get('btts_ht_percentage', 0) >= 100.0
+                                    and current_time >= 2
                                     and current_time <= 3):
                                 print(f"[DEBUG] {match_id}: +0.5 HT (Battle 8m) OK")
                                 msg = format_message(match, h2h_metrics, "+0.5 HT", bet365_ev_id)
@@ -558,7 +561,7 @@ async def main():
                             # Outras ligas — incluir taxa de ataques perigosos
                             da_rate = calculate_dangerous_attacks_rate(match, current_time)
                             if da_rate >= 1.0 and h2h_metrics and h2h_metrics.get('over_0_5_ht_percentage', 0) >= 100.0 and \
-                                    h2h_metrics.get('over_1_5_ht_percentage', 0) >= 85.0:
+                                    h2h_metrics.get('over_1_5_ht_percentage', 0) >= 85.0 and current_time > 3:
                                 print(f"[DEBUG] {match_id}: +0.5 HT OK — da_rate={da_rate:.2f}")
                                 msg = format_message(match, h2h_metrics, "+0.5 HT", bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, "+0.5 HT")
@@ -579,7 +582,7 @@ async def main():
 
                     # Para Esoccer GT Leagues – 12 mins play
                     elif "Esoccer GT Leagues – 12 mins play" in league_name and current_time > 6:
-                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 95.0:
+                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 100.0:
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -605,7 +608,7 @@ async def main():
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
                             # "1.5, 2.0 gols FT" se soma das médias >= 3.0
-                            if h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0 and h2h_metrics['over_1_5_ht_percentage'] >= 95.0:
+                            if h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0 and h2h_metrics['over_1_5_ht_percentage'] >= 100.0:
                                 strategy = "1.5, 2.0 gols FT"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
