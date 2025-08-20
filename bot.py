@@ -574,7 +574,7 @@ async def main():
                 if (home_goals == 1 and away_goals == 0) or (home_goals == 0 and away_goals == 1):
                     # Para Esoccer Battle - 8 mins play e Esoccer H2H GG League - 8 mins play
                     if ("Esoccer Battle - 8 mins play" in league_name or "Esoccer H2H GG League - 8 mins play" in league_name) and current_time > 4:
-                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 95.0:
+                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 100.0:
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
