@@ -4,6 +4,7 @@ import requests
 import json
 import asyncio
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from telegram import Bot  # Requires python-telegram-bot v20+: pip install python-telegram-bot
 
 BOT_TOKEN = "6569266928:AAHm7pOJVsd3WKzJEgdVDez4ZYdCAlRoYO8"
@@ -19,6 +20,8 @@ MANAUS_TZ = timezone(timedelta(hours=-4))
 
 sent_tips = []  # [{'match_id': int, 'strategy': str, 'sent_time': datetime, 'status': 'pending/green/red/refund', 'message_id': int, 'message_text': str}]
 last_summary = None  # para não spammar o indicador
+last_league_summary = None
+league_stats = {}
 
 def fetch_old_live_matches():
     try:
@@ -64,8 +67,7 @@ def fetch_ended_matches():
         "Authorization": AUTH_TOKEN
     }
     items = []
-    today = datetime.now(timezone.utc).date()
-    params = {"page": 1, "limit": 150, "sport": "esoccer", "status": "ended"}
+    params = {"page": 1, "limit": 200, "sport": "esoccer", "status": "ended"}
     url = ENDED_API_URL
     print(f"[DEBUG] GET {url} params={params}")
     
@@ -76,11 +78,8 @@ def fetch_ended_matches():
             return items
         data = response.json()
         for item in data.get('items', []):
-            start_time_str = (item.get('startTime') or '').rstrip('Z')
-            start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=timezone.utc) if start_time_str else datetime.now(timezone.utc)
-            if start_time.date() >= today:
-                items.append(item)
-        print(f"[DEBUG] Finalizadas retornadas (hoje+): {len(items)}")
+            items.append(item)
+        print(f"[DEBUG] Finalizadas retornadas: {len(items)}")
     except Exception as e:
         print(f"[ERROR] fetch_ended_matches: {e}")
     return items
@@ -328,11 +327,16 @@ async def send_message(bot, match_id, message, sent_matches, strategy):
     except Exception as e:
         print(f"[ERROR] send_message {match_id}: {e}")
 
+def format_thermometer(perc):
+    bars = 10
+    green_count = round(perc / 10)
+    bar = '🟩' * green_count + '🟥' * (bars - green_count)
+    return f"{bar} {perc:.0f}%  {(100 - perc):.0f}%"
+
 async def periodic_check(bot):
-    global last_summary
+    global last_summary, league_stats, last_league_summary
     while True:
         try:
-            await asyncio.sleep(180)  # 5 min
             print("[INFO] Verificando status das tips...")
             ended = fetch_ended_matches()
             ended_dict = {}
@@ -462,12 +466,137 @@ async def periodic_check(bot):
                     print("[INFO] Indicador igual ao anterior — não reenviado.")
             else:
                 print("[INFO] Sem resultados para indicador.")
+
+            # Computar estatísticas das ligas
+            league_games = defaultdict(list)
+            for m in ended:
+                league = m.get('competition', {}).get('name') or m.get('tournamentName') or m.get('leagueName') or 'Unknown'
+                print(f"[DEBUG] Processing league: {league}")
+                if league == 'Unknown': continue
+                start_time_str = (m.get('startTime') or '').rstrip('Z')
+                try:
+                    start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=timezone.utc)
+                except:
+                    continue
+                ft_home = m.get('score', {}).get('home', 0) or 0
+                ft_away = m.get('score', {}).get('away', 0) or 0
+                ft_goals = ft_home + ft_away
+                ht_home = m.get('scoreHT', {}).get('home', 0) or 0
+                ht_away = m.get('scoreHT', {}).get('away', 0) or 0
+                ht_goals = ht_home + ht_away
+                league_games[league].append({'start_time': start_time, 'ht_goals': ht_goals, 'ft_goals': ft_goals})
+
+            stats = {}
+            for league, games in league_games.items():
+                games.sort(key=lambda x: x['start_time'], reverse=True)
+                last5 = games[:5]
+                if len(last5) < 5: continue
+                ht_over = {
+                    '0.5': sum(g['ht_goals'] > 0 for g in last5) / 5 * 100,
+                    '1.5': sum(g['ht_goals'] > 1 for g in last5) / 5 * 100,
+                    '2.5': sum(g['ht_goals'] > 2 for g in last5) / 5 * 100,
+                }
+                ft_over = {
+                    '0.5': sum(g['ft_goals'] > 0 for g in last5) / 5 * 100,
+                    '1.5': sum(g['ft_goals'] > 1 for g in last5) / 5 * 100,
+                    '2.5': sum(g['ft_goals'] > 2 for g in last5) / 5 * 100,
+                    '3.5': sum(g['ft_goals'] > 3 for g in last5) / 5 * 100,
+                    '4.5': sum(g['ft_goals'] > 4 for g in last5) / 5 * 100,
+                }
+                stats[league] = {'ht': ht_over, 'ft': ft_over}
+            league_stats = stats
+
+            # Enviar resumo das ligas
+            if stats:
+                # Calculate average over percentage for each league
+                league_over_avg = {}
+                for league, s in stats.items():
+                    ft_over_values = [s['ft'][threshold] for threshold in ['0.5', '1.5', '2.5', '3.5', '4.5']]
+                    avg_over = sum(ft_over_values) / len(ft_over_values) if ft_over_values else 0
+                    league_over_avg[league] = avg_over
+
+                # Find the most over-friendly and most under-friendly leagues
+                most_over_league = max(league_over_avg.items(), key=lambda x: x[1], default=("Nenhuma", 0))
+                most_under_league = min(league_over_avg.items(), key=lambda x: x[1], default=("Nenhuma", 0))
+
+                # Build summary message
+                summary_msg = "<b>Resumo das Ligas (últimos 5 jogos)</b>\n\n"
+                for league, s in stats.items():
+                    summary_msg += f"<b>{league}</b>\n"
+                    for line in ['0.5', '1.5', '2.5', '3.5', '4.5']:
+                        p = s['ft'][line]
+                        thermo = format_thermometer(p)
+                        summary_msg += f"OVER {line}\n{thermo}\n"
+                    summary_msg += "\n"
+
+                # Add highlights
+                summary_msg += f"<b>🏆 Liga mais OVER: {most_over_league[0]} (Média OVER: {most_over_league[1]:.1f}%)</b>\n"
+                summary_msg += f"<b>🚫 Evitar: {most_under_league[0]} (Média OVER: {most_under_league[1]:.1f}%)</b>\n"
+
+                if summary_msg != last_league_summary:
+                    try:
+                        await bot.send_message(chat_id=CHAT_ID, text=summary_msg, parse_mode="HTML")
+                        last_league_summary = summary_msg
+                        print("[INFO] Resumo das ligas enviado.")
+                    except Exception as e:
+                        print(f"[ERROR] resumo ligas: {e}")
+                else:
+                    print("[INFO] Resumo das ligas igual ao anterior — não reenviado.")
         except Exception as e:
             print(f"[ERROR] periodic_check: {e}")
+        await asyncio.sleep(720)  # 12 minutes
 
 async def main():
+    global league_stats  # Declare league_stats as global
     bot = Bot(token=BOT_TOKEN)
     sent_matches = set()
+    
+    # Wait for initial data population
+    print("[INFO] Aguardando inicialização dos dados de liga...")
+    while not league_stats:
+        ended = fetch_ended_matches()
+        league_games = defaultdict(list)
+        for m in ended:
+            league = m.get('competition', {}).get('name') or m.get('tournamentName') or m.get('leagueName') or 'Unknown'
+            if league == 'Unknown': continue
+            start_time_str = (m.get('startTime') or '').rstrip('Z')
+            try:
+                start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=timezone.utc)
+            except:
+                continue
+            ft_home = m.get('score', {}).get('home', 0) or 0
+            ft_away = m.get('score', {}).get('away', 0) or 0
+            ft_goals = ft_home + ft_away
+            ht_home = m.get('scoreHT', {}).get('home', 0) or 0
+            ht_away = m.get('scoreHT', {}).get('away', 0) or 0
+            ht_goals = ht_home + ht_away
+            league_games[league].append({'start_time': start_time, 'ht_goals': ht_goals, 'ft_goals': ft_goals})
+
+        stats = {}
+        for league, games in league_games.items():
+            games.sort(key=lambda x: x['start_time'], reverse=True)
+            last5 = games[:5]
+            if len(last5) >= 5:  # Only include leagues with at least 5 games
+                ht_over = {
+                    '0.5': sum(g['ht_goals'] > 0 for g in last5) / 5 * 100,
+                    '1.5': sum(g['ht_goals'] > 1 for g in last5) / 5 * 100,
+                    '2.5': sum(g['ht_goals'] > 2 for g in last5) / 5 * 100,
+                }
+                ft_over = {
+                    '0.5': sum(g['ft_goals'] > 0 for g in last5) / 5 * 100,
+                    '1.5': sum(g['ft_goals'] > 1 for g in last5) / 5 * 100,
+                    '2.5': sum(g['ft_goals'] > 2 for g in last5) / 5 * 100,
+                    '3.5': sum(g['ft_goals'] > 3 for g in last5) / 5 * 100,
+                    '4.5': sum(g['ft_goals'] > 4 for g in last5) / 5 * 100,
+                }
+                stats[league] = {'ht': ht_over, 'ft': ft_over}
+        league_stats = stats
+        if league_stats:  # Break if any league has data
+            print("[INFO] Dados de liga inicializados com sucesso!")
+            break
+        else:
+            print("[INFO] Dados de liga ainda não disponíveis, aguardando 10 segundos...")
+            await asyncio.sleep(10)
     
     asyncio.create_task(periodic_check(bot))
     
@@ -517,13 +646,15 @@ async def main():
                 if is_first_half(match, league_name):
                     # Estratégia +1.5 HT: 1x0 ou 0x1
                     if (home_goals == 1 and away_goals == 0) or (home_goals == 0 and away_goals == 1):
+                        league_ok = league_stats and league_name in league_stats and league_stats[league_name]['ht']['1.5'] >= 90.0
                         # 8 mins play: até 3'
                         if ("8 mins play" in league_name
                                 and current_time <= 3
                                 and current_time > 0
                                 and h2h_metrics
                                 and h2h_metrics.get('over_1_5_ht_percentage', 0) >= 100.0
-                                and h2h_metrics.get('over_2_5_ht_percentage', 0) >= 70.0):
+                                and h2h_metrics.get('over_2_5_ht_percentage', 0) >= 70.0
+                                and league_ok):
                             print(f"[DEBUG] {match_id}: +1.5 HT (8m) OK")
                             msg = format_message(match, h2h_metrics, "+1.5 HT", bet365_ev_id)
                             await send_message(bot, match_id, msg, sent_matches, "+1.5 HT")
@@ -534,47 +665,54 @@ async def main():
                               and current_time > 0
                               and h2h_metrics
                               and h2h_metrics.get('over_1_5_ht_percentage', 0) >= 100.0
-                              and h2h_metrics.get('over_2_5_ht_percentage', 0) >= 85.0):
+                              and h2h_metrics.get('over_2_5_ht_percentage', 0) >= 85.0
+                              and league_ok):
                             print(f"[DEBUG] {match_id}: +1.5 HT (12/10m) OK")
                             msg = format_message(match, h2h_metrics, "+1.5 HT", bet365_ev_id)
                             await send_message(bot, match_id, msg, sent_matches, "+1.5 HT")
                         else:
                             print(
-                                f"[DEBUG] {match_id}: +1.5 HT NÃO — t={current_time:.2f} O1.5={h2h_metrics.get('over_1_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} O2.5={h2h_metrics.get('over_2_5_ht_percentage','N/A') if h2h_metrics else 'N/A'}")
+                                f"[DEBUG] {match_id}: +1.5 HT NÃO — t={current_time:.2f} O1.5={h2h_metrics.get('over_1_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} O2.5={h2h_metrics.get('over_2_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} league_ok={league_ok}")
 
                     # Estratégia +0.5 HT: 0x0
                     if total_goals == 0:
+                        league_ok = False
+                        if league_stats and league_name in league_stats:
+                            league_ok = league_stats[league_name]['ht']['0.5'] >= 90.0
+                        print(f"[DEBUG] League check for {league_name}: league_ok={league_ok}, league_stats={league_stats}")
                         if "Esoccer Battle - 8 mins play" in league_name:
                             # Critérios para Battle 8m
                             if (h2h_metrics
                                     and h2h_metrics.get('over_1_5_ht_percentage', 0) >= 100.0
                                     and h2h_metrics.get('btts_ht_percentage', 0) >= 100.0
                                     and current_time >= 2
-                                    and current_time <= 3):
+                                    and current_time <= 3
+                                    and league_ok):
                                 print(f"[DEBUG] {match_id}: +0.5 HT (Battle 8m) OK")
                                 msg = format_message(match, h2h_metrics, "+0.5 HT", bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, "+0.5 HT")
                             else:
                                 print(
-                                    f"[DEBUG] {match_id}: +0.5 HT (Battle 8m) NÃO — O1.5={h2h_metrics.get('over_1_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} BTTS={h2h_metrics.get('btts_ht_percentage','N/A') if h2h_metrics else 'N/A'} t={current_time:.2f}")
+                                    f"[DEBUG] {match_id}: +0.5 HT (Battle 8m) NÃO — O1.5={h2h_metrics.get('over_1_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} BTTS={h2h_metrics.get('btts_ht_percentage','N/A') if h2h_metrics else 'N/A'} t={current_time:.2f} league_ok={league_ok}")
                         else:
                             # Outras ligas — incluir taxa de ataques perigosos
                             da_rate = calculate_dangerous_attacks_rate(match, current_time)
                             if da_rate >= 1.0 and h2h_metrics and h2h_metrics.get('over_0_5_ht_percentage', 0) >= 100.0 and \
-                                    h2h_metrics.get('over_1_5_ht_percentage', 0) >= 85.0 and current_time > 3:
+                                    h2h_metrics.get('over_1_5_ht_percentage', 0) >= 85.0 and current_time > 3 and league_ok:
                                 print(f"[DEBUG] {match_id}: +0.5 HT OK — da_rate={da_rate:.2f}")
                                 msg = format_message(match, h2h_metrics, "+0.5 HT", bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, "+0.5 HT")
                             else:
                                 print(
-                                    f"[DEBUG] {match_id}: +0.5 HT NÃO — O0.5={h2h_metrics.get('over_0_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} O1.5={h2h_metrics.get('over_1_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} da_rate={da_rate:.2f}")
+                                    f"[DEBUG] {match_id}: +0.5 HT NÃO — O0.5={h2h_metrics.get('over_0_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} O1.5={h2h_metrics.get('over_1_5_ht_percentage','N/A') if h2h_metrics else 'N/A'} da_rate={da_rate:.2f} league_ok={league_ok}")
 
                 # ---------- Estratégias para o Tempo Todo (FT) ----------
                 # Estratégias para placar 1x0 ou 0x1
                 if (home_goals == 1 and away_goals == 0) or (home_goals == 0 and away_goals == 1):
                     # Para Esoccer Battle - 8 mins play e Esoccer H2H GG League - 8 mins play
                     if ("Esoccer Battle - 8 mins play" in league_name or "Esoccer H2H GG League - 8 mins play" in league_name) and current_time > 4:
-                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 100.0:
+                        league_ok = league_stats and league_name in league_stats and league_stats[league_name]['ft']['2.5'] >= 90.0
+                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 100.0 and league_ok:
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -582,7 +720,8 @@ async def main():
 
                     # Para Esoccer GT Leagues – 12 mins play
                     elif "Esoccer GT Leagues – 12 mins play" in league_name and current_time > 6:
-                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 100.0:
+                        league_ok = league_stats and league_name in league_stats and league_stats[league_name]['ft']['2.5'] >= 90.0
+                        if h2h_metrics and (h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 4.0) and h2h_metrics['over_1_5_ht_percentage'] >= 100.0 and league_ok:
                             strategy = "2.5, 3.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -594,21 +733,21 @@ async def main():
                     if ("Esoccer Battle - 8 mins play" in league_name or "Esoccer H2H GG League - 8 mins play" in league_name) and current_time > 4:
                         if h2h_metrics:
                             # "+1.5 gols {player}" para cada jogador
-                            if h2h_metrics['player1_avg_goals'] >= 2.5 and h2h_metrics['player1_win_percentage'] >= 60.0:
+                            if h2h_metrics['player1_avg_goals'] >= 2.5 and h2h_metrics['player1_win_percentage'] >= 60.0 and h2h_metrics['over_0_5_ht_percentage'] >= 100.0:
                                 strategy = f"+1.5 gols {player1}"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
-                            if h2h_metrics['player2_avg_goals'] >= 2.5 and h2h_metrics['player2_win_percentage'] >= 60.0:
-
+                            if h2h_metrics['player2_avg_goals'] >= 2.5 and h2h_metrics['player2_win_percentage'] >= 60.0 and h2h_metrics['over_0_5_ht_percentage'] >= 100.0:
                                 strategy = f"+1.5 gols {player2}"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
                             # "1.5, 2.0 gols FT" se soma das médias >= 3.0
-                            if h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0 and h2h_metrics['over_1_5_ht_percentage'] >= 100.0:
+                            league_ok = league_stats and league_name in league_stats and league_stats[league_name]['ft']['1.5'] >= 90.0
+                            if h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0 and h2h_metrics['over_1_5_ht_percentage'] >= 100.0 and league_ok:
                                 strategy = "1.5, 2.0 gols FT"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (8m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -618,21 +757,22 @@ async def main():
                     elif "Esoccer GT Leagues – 12 mins play" in league_name:
                         # "+1.5 gols {player}" para cada jogador (tempo > 6 minutos)
                         if current_time > 6 and h2h_metrics:
-                            if h2h_metrics['player1_avg_goals'] >= 2.5 and h2h_metrics['player1_win_percentage'] >= 60.0:
+                            if h2h_metrics['player1_avg_goals'] >= 2.5 and h2h_metrics['player1_win_percentage'] >= 60.0 and h2h_metrics['over_0_5_ht_percentage'] >= 100.0:
                                 strategy = f"+1.5 gols {player1}"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
-                            if h2h_metrics['player2_avg_goals'] >= 2.5 and h2h_metrics['player2_win_percentage'] >= 60.0:
+                            if h2h_metrics['player2_avg_goals'] >= 2.5 and h2h_metrics['player2_win_percentage'] >= 60.0 and h2h_metrics['over_0_5_ht_percentage'] >= 100.0:
                                 strategy = f"+1.5 gols {player2}"
                                 print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
                                 msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
                                 await send_message(bot, match_id, msg, sent_matches, strategy)
 
                         # "1.5, 2.0 gols FT" (tempo > 4 minutos)
+                        league_ok = league_stats and league_name in league_stats and league_stats[league_name]['ft']['1.5'] >= 90.0
                         if current_time > 4 and h2h_metrics and (
-                                h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0):
+                                h2h_metrics['player1_avg_goals'] + h2h_metrics['player2_avg_goals'] >= 3.0) and league_ok:
                             strategy = "1.5, 2.0 gols FT"
                             print(f"[DEBUG] {match_id}: {strategy} OK (GT 12m)")
                             msg = format_message(match, h2h_metrics, strategy, bet365_ev_id)
@@ -641,7 +781,7 @@ async def main():
         except Exception as e:
             print(f"[ERROR] loop principal: {e}")
         
-        await asyncio.sleep(10)  # a cada 15s
+        await asyncio.sleep(10)  # a cada 10s
 
 if __name__ == "__main__":
     asyncio.run(main())
