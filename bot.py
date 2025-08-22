@@ -553,7 +553,7 @@ async def periodic_check(bot):
                     print("[INFO] Resumo das ligas igual ao anterior — não reenviado.")
         except Exception as e:
             print(f"[ERROR] periodic_check: {e}")
-        await asyncio.sleep(720)  # 12 minutes
+        await asyncio.sleep(240)  # 4 minutes
 
 async def main():
     global league_stats  # Declare league_stats as global
