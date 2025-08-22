@@ -22,6 +22,7 @@ sent_tips = []  # [{'match_id': int, 'strategy': str, 'sent_time': datetime, 'st
 last_summary = None  # para não spammar o indicador
 last_league_summary = None
 league_stats = {}
+last_league_message_id = None  # To track the last league summary message ID
 
 def fetch_old_live_matches():
     try:
@@ -334,7 +335,8 @@ def format_thermometer(perc):
     return f"{bar} {perc:.0f}%  {(100 - perc):.0f}%"
 
 async def periodic_check(bot):
-    global last_summary, league_stats, last_league_summary
+    global last_summary, league_stats, last_league_summary, last_league_message_id
+
     while True:
         try:
             print("[INFO] Verificando status das tips...")
@@ -534,12 +536,19 @@ async def periodic_check(bot):
                 summary_msg += f"<b>🚫 Evitar: {most_under_league[0]} (Média OVER: {most_under_league[1]:.1f}%)</b>\n"
 
                 if summary_msg != last_league_summary:
-                    try:
-                        await bot.send_message(chat_id=CHAT_ID, text=summary_msg, parse_mode="HTML")
-                        last_league_summary = summary_msg
-                        print("[INFO] Resumo das ligas enviado.")
-                    except Exception as e:
-                        print(f"[ERROR] resumo ligas: {e}")
+                    # Delete the previous league summary message if it exists
+                    if last_league_message_id is not None:
+                        try:
+                            await bot.delete_message(chat_id=CHAT_ID, message_id=last_league_message_id)
+                            print(f"[INFO] Mensagem de resumo das ligas anterior ({last_league_message_id}) deletada.")
+                        except Exception as delete_e:
+                            print(f"[ERROR] Falha ao deletar mensagem anterior {last_league_message_id}: {delete_e}")
+
+                    # Send the new league summary message
+                    message_obj = await bot.send_message(chat_id=CHAT_ID, text=summary_msg, parse_mode="HTML")
+                    last_league_summary = summary_msg
+                    last_league_message_id = message_obj.message_id  # Update the stored message ID
+                    print("[INFO] Resumo das ligas enviado.")
                 else:
                     print("[INFO] Resumo das ligas igual ao anterior — não reenviado.")
         except Exception as e:
